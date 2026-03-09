@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>TowCheck Pro</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Barlow:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#080808;font-family:'Barlow',sans-serif;color:#f0ede6}
+  ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#111}::-webkit-scrollbar-thumb{background:#2c2c2c;border-radius:2px}
+  input,textarea,button{font-family:'Barlow',sans-serif}
+  textarea{resize:vertical}
+  a{text-decoration:none}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes glow{0%,100%{box-shadow:0 0 40px #ef444455}50%{box-shadow:0 0 60px #ef444488}}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef} = React;
+
+// ─── GLOBALS ───────────────────────────────
+const C = {
+  bg:"#080808",surface:"#111",card:"#1a1a1a",card2:"#222",
+  border:"#2c2c2c",amber:"#f59e0b",amberDark:"#78350f",
+  red:"#ef4444",green:"#22c55e",blue:"#3b82f6",purple:"#a855f7",
+  text:"#f0ede6",dim:"#555",sub:"#888"
+};
+
+let API_KEY = '';
+
+const TOW_SYSTEM = `You are TowCheck Pro — a Professional Towing Recovery Assistant. Based on official OEM documentation, provide complete towing procedures using EXACTLY this format:
+
+QUICK REFERENCE: [YEAR] [MAKE] [MODEL]
+Towing Method: [FLATBED / FRONT LIFT / REAR LIFT / DOLLIES REQUIRED]
+Drivetrain: [FWD / RWD / AWD / 4WD]
+Risk Level: [LOW / MEDIUM / HIGH]
+
+📋 STEP-BY-STEP PROCEDURE
+1. Preparation: [exact steps]
+2. Getting Into Neutral: [procedures including dead battery override method]
+3. Securing Vehicle: [exact tie-down points and method]
+
+⚠️ CRITICAL WARNINGS
+- [warning 1]
+- [warning 2]
+- [warning 3]
+
+🔍 VERIFICATION
+[Visual cues that confirm correct procedure]
+
+📚 SOURCE: [Official OEM documentation reference]
+
+RULES: AWD/4WD = FLATBED ONLY. EV = Transport Mode + FLATBED ONLY. Always include dead battery override. Highlight HIGH VOLTAGE for EVs.`;
+
+async function callClaude(messages, system, max_tokens=1500) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "x-api-key": API_KEY,
+      "anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true"
+    },
+    body: JSON.stringify({model:"claude-sonnet-4-20250514", max_tokens, system, messages})
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(()=>({}));
+    throw new Error(e.error?.message || "API error " + r.status);
+  }
+  const d = await r.json();
+  return d.content.map(b=>b.text||"").join("\n");
+}
+
+// ─── SHARED UI ─────────────────────────────
+const Card = ({children,style={}})=>(
+  <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:16,...style}}>{children}</div>
+);
+const Label = ({children})=>(
+  <div style={{fontSize:10,color:C.sub,fontWeight:700,letterSpacing:1.5,marginBottom:5}}>{children}</div>
+);
+const Btn = ({children,onClick,disabled,variant,style={},full})=>{
+  const bg = variant==="danger"?C.red:variant==="success"?C.green:variant==="ghost"?"transparent":variant==="blue"?C.blue:C.amber;
+  const clr = variant==="ghost"?C.sub:variant==="amber"||!variant?"#000":"#fff";
+  return <button onClick={onClick} disabled={disabled} style={{
+    background:bg,color:clr,border:variant==="ghost"?`1px solid ${C.border}`:"none",
+    borderRadius:10,padding:"12px 18px",fontSize:13,fontWeight:700,
+    cursor:disabled?"not-allowed":"pointer",opacity:disabled?.45:1,
+    letterSpacing:.5,width:full?"100%":undefined,transition:"opacity .2s",...style
+  }}>{children}</button>;
+};
+const TInput = ({value,onChange,placeholder,multiline,rows})=>{
+  const s={width:"100%",background:C.card2,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 14px",color:C.text,fontSize:13,outline:"none"};
+  return multiline
+    ? <textarea value={value} onChange={onChange} placeholder={placeholder} rows={rows||3} style={s}/>
+    : <input value={value} onChange={onChange} placeholder={placeholder} style={s}/>;
+};
+const Badge = ({label,color})=>(
+  <span style={{background:color+"20",color,border:`1px solid ${color}44`,borderRadius:5,padding:"2px 8px",fontSize:10,fontWeight:700,letterSpacing:1}}>{label}</span>
+);
+const SectionHead = ({icon,title,sub})=>(
+  <div style={{padding:"18px 16px 14px"}}>
+    <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:28,letterSpacing:3,color:C.amber,lineHeight:1}}>{icon} {title}</div>
+    {sub&&<div style={{fontSize:11,color:C.sub,marginTop:2,letterSpacing:.5}}>{sub}</div>}
+  </div>
+);
+
+const colorLine = (line)=>{
+  if(line.startsWith("QUICK REFERENCE")) return C.amber;
+  if(line.includes("⚠️")||line.includes("CRITICAL")||line.includes("WARNINGS")) return C.red;
+  if(line.includes("📋")||line.includes("🔍")||line.includes("📚")) return C.blue;
+  if(line.includes("HIGH")&&line.includes("Risk")) return C.red;
+  if(line.includes("MEDIUM")&&line.includes("Risk")) return C.amber;
+  if(line.includes("LOW")&&line.includes("Risk")) return C.green;
+  if(line.includes("FLATBED")||line.includes("FRONT LIFT")||line.includes("REAR LIFT")) return C.green;
+  return C.text;
+};
+
+const TowResult = ({text,vehicle,onPrint})=>{
+  if(!text) return null;
+  return (
+    <Card style={{margin:"0 16px 14px"}}>
+      <pre style={{whiteSpace:"pre-wrap",fontFamily:"'JetBrains Mono',monospace",fontSize:11.5,lineHeight:1.75,margin:0,color:C.text}}>
+        {text.split("\n").map((line,i)=>(
+          <span key={i} style={{color:colorLine(line),display:"block"}}>{line||" "}</span>
+        ))}
+      </pre>
+      <div style={{display:"flex",gap:8,marginTop:12}}>
+        <Btn variant="ghost" style={{fontSize:12,padding:"8px 14px"}} onClick={onPrint}>🖨️ PDF Export</Btn>
+      </div>
+    </Card>
+  );
+};
+
+function printPDF(vehicle,result){
+  const w=window.open("","_blank"); if(!w) return;
+  w.document.write(`<!DOCTYPE html><html><head><title>TowCheck Pro — ${vehicle}</title>
+  <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Courier New',monospace;background:#fff;color:#111;padding:30px;max-width:700px;margin:0 auto}
+  .hdr{border-bottom:3px solid #f59e0b;padding-bottom:14px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center}
+  .logo{font-size:22px;font-weight:900;letter-spacing:3px;color:#f59e0b}.meta{font-size:11px;color:#666;text-align:right}
+  pre{white-space:pre-wrap;font-size:12px;line-height:1.7}
+  .footer{margin-top:30px;padding-top:14px;border-top:1px solid #ddd;font-size:10px;color:#aaa;text-align:center}
+  </style></head><body>
+  <div class="hdr"><div><div class="logo">🏗️ TOWCHECK PRO</div><div style="font-size:11px;color:#888;margin-top:4px">Professional Towing Recovery Assistant</div></div>
+  <div class="meta">Generated: ${new Date().toLocaleString()}<br>Vehicle: ${vehicle}</div></div>
+  <pre>${result.replace(/</g,"&lt;")}</pre>
+  <div class="footer">TowCheck Pro · AI-Powered Towing Assistant · ${new Date().getFullYear()}</div>
+  </body></html>`);
+  w.document.close(); setTimeout(()=>w.print(),500);
+}
+
+// ─── KEY SCREEN ────────────────────────────
+function KeyScreen({onUnlock}){
+  const [key,setKey]=useState('');
+  const [err,setErr]=useState('');
+  const [testing,setTesting]=useState(false);
+
+  const test = async()=>{
+    if(!key.trim().startsWith("sk-ant-")){setErr("Key should start with sk-ant-");return;}
+    setTesting(true);setErr('');
+    try{
+      API_KEY=key.trim();
+      await callClaude([{role:"user",content:"reply ok"}],"Reply with just the word ok",20);
+      onUnlock();
+    }catch(e){
+      API_KEY='';
+      setErr("Key rejected: "+e.message);
+    }finally{setTesting(false);}
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{width:"100%",maxWidth:400}}>
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{fontSize:56,marginBottom:12}}>🏗️</div>
+          <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:36,letterSpacing:4,color:C.amber}}>TOWCHECK PRO</div>
+          <div style={{fontSize:12,color:C.sub,letterSpacing:2,marginTop:4}}>PROFESSIONAL TOWING ASSISTANT</div>
+        </div>
+        <Card>
+          <Label>ANTHROPIC API KEY</Label>
+          <input
+            type="password"
+            value={key}
+            onChange={e=>setKey(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&test()}
+            placeholder="sk-ant-api03-..."
+            style={{width:"100%",background:C.card2,border:`1px solid ${C.border}`,borderRadius:10,padding:"13px 14px",color:C.text,fontSize:14,outline:"none",marginBottom:12}}
+          />
+          {err&&<div style={{padding:"9px 12px",background:C.red+"18",border:`1px solid ${C.red}33`,borderRadius:8,fontSize:12,color:C.red,marginBottom:12}}>⚠️ {err}</div>}
+          <Btn full onClick={test} disabled={testing||!key}>
+            {testing?"⟳ VERIFYING KEY...":"UNLOCK APP →"}
+          </Btn>
+          <div style={{marginTop:16,padding:"12px 14px",background:C.card2,borderRadius:10,fontSize:11,color:C.sub,lineHeight:1.7}}>
+            🔒 Key stays in memory only — never saved, never sent anywhere except Anthropic's API.<br/>
+            Get your key at <span style={{color:C.amber}}>console.anthropic.com</span>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ─── SEARCH TAB ────────────────────────────
+function SearchTab({history,addToHistory}){
+  const [q,setQ]=useState('');
+  const [result,setResult]=useState('');
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState('');
+  const [showTrans,setShowTrans]=useState(false);
+  const [transLang,setTransLang]=useState('Spanish');
+  const [translated,setTranslated]=useState('');
+  const [tLoading,setTLoading]=useState(false);
+  const langs=["Spanish","French","Portuguese","German","Chinese","Arabic"];
+
+  const doSearch=async(query)=>{
+    const v=query||q; if(!v.trim())return;
+    setLoading(true);setErr('');setResult('');setTranslated('');setShowTrans(false);
+    try{
+      const t=await callClaude([{role:"user",content:`Provide complete towing procedure for: ${v}`}],TOW_SYSTEM);
+      setResult(t); addToHistory(v,t);
+    }catch(e){setErr("Search failed: "+e.message);}
+    finally{setLoading(false);}
+  };
+
+  const doTranslate=async()=>{
+    setTLoading(true);setTranslated('');
+    try{
+      const t=await callClaude([{role:"user",content:`Translate this towing procedure to ${transLang}. Keep all formatting:\n\n${result}`}],
+        "You are a professional technical translator. Translate accurately, preserving all formatting and safety terminology.");
+      setTranslated(t);
+    }catch{setTranslated("Translation failed.");}
+    finally{setTLoading(false);}
+  };
+
+  return(
+    <div>
+      <SectionHead icon="🔍" title="TOW PROCEDURE SEARCH" sub="AI-powered OEM documentation lookup"/>
+      <div style={{padding:"0 16px 16px"}}>
+        <div style={{display:"flex",gap:8}}>
+          <input value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doSearch()}
+            placeholder="e.g. 2024 Tesla Model 3 AWD"
+            style={{flex:1,background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",color:C.text,fontSize:14,outline:"none"}}/>
+          <Btn onClick={()=>doSearch()} disabled={loading}>{loading?"···":"GO"}</Btn>
+        </div>
+        {err&&<div style={{marginTop:8,padding:"10px 12px",background:C.red+"18",border:`1px solid ${C.red}33`,borderRadius:8,fontSize:12,color:C.red}}>⚠️ {err}</div>}
+      </div>
+      {loading&&<div style={{textAlign:"center",padding:"28px 16px"}}>
+        <div style={{fontSize:10,letterSpacing:3,color:C.amber,fontWeight:700,animation:"blink 1s infinite"}}>⟳ SEARCHING OEM DATABASES...</div>
+      </div>}
+      {result&&<>
+        <TowResult text={result} vehicle={q} onPrint={()=>printPDF(q,result)}/>
+        <div style={{padding:"0 16px 14px"}}>
+          <Btn variant="ghost" full onClick={()=>setShowTrans(s=>!s)} style={{fontSize:12,padding:"9px"}}>
+            🌐 {showTrans?"Hide Translation":"Translate Procedure"}
+          </Btn>
+        </div>
+        {showTrans&&<Card style={{margin:"0 16px 14px"}}>
+          <Label>TARGET LANGUAGE</Label>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>
+            {langs.map(l=>(
+              <button key={l} onClick={()=>setTransLang(l)} style={{
+                padding:"5px 11px",fontSize:11,borderRadius:6,cursor:"pointer",fontWeight:700,
+                background:transLang===l?C.amber:C.card2,color:transLang===l?"#000":C.text,
+                border:`1px solid ${transLang===l?C.amber:C.border}`}}>{l}</button>
+            ))}
+          </div>
+          <Btn onClick={doTranslate} disabled={tLoading} full>{tLoading?"Translating...":"Translate → "+transLang}</Btn>
+          {translated&&<pre style={{marginTop:12,whiteSpace:"pre-wrap",fontSize:11.5,fontFamily:"'JetBrains Mono',monospace",color:C.text,lineHeight:1.7}}>{translated}</pre>}
+        </Card>}
+      </>}
+      {history.length>0&&<div style={{padding:"0 16px"}}>
+        <Label>RECENT SEARCHES</Label>
+        {history.map((h,i)=>(
+          <div key={i} onClick={()=>{setQ(h.v);setResult(h.r);}}
+            style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 14px",marginBottom:8,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontSize:13,fontWeight:700}}>{h.v}</div>
+              <div style={{fontSize:10,color:C.dim,marginTop:2}}>{h.ts}</div>
+            </div>
+            <span style={{color:C.amber,fontSize:16}}>›</span>
+          </div>
+        ))}
+      </div>}
+    </div>
+  );
+}
+
+// ─── VOICE TAB ─────────────────────────────
+function VoiceTab({addToHistory}){
+  const [listening,setListening]=useState(false);
+  const [transcript,setTranscript]=useState('');
+  const [result,setResult]=useState('');
+  const [loading,setLoading]=useState(false);
+  const [speaking,setSpeaking]=useState(false);
+  const [err,setErr]=useState('');
+  const recRef=useRef();
+
+  const toggleListen=()=>{
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){setErr("Voice not supported. Use Chrome.");return;}
+    if(listening){recRef.current?.stop();setListening(false);return;}
+    const rec=new SR();
+    rec.continuous=true;rec.interimResults=true;rec.lang="en-US";
+    rec.onresult=e=>setTranscript(Array.from(e.results).map(r=>r[0].transcript).join(" "));
+    rec.onerror=()=>setErr("Microphone access denied.");
+    rec.onend=()=>setListening(false);
+    recRef.current=rec;rec.start();setListening(true);setErr('');
+  };
+
+  const doSearch=async()=>{
+    if(!transcript.trim())return;
+    setLoading(true);setResult('');
+    try{
+      const t=await callClaude([{role:"user",content:`Towing procedure for: ${transcript}`}],TOW_SYSTEM);
+      setResult(t);addToHistory(transcript,t);speak(t);
+    }catch(e){setErr("Search failed: "+e.message);}
+    finally{setLoading(false);}
+  };
+
+  const speak=(text)=>{
+    if(!window.speechSynthesis)return;
+    window.speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text.replace(/[^\w\s.,!?:\-]/g," ").slice(0,2000));
+    u.rate=0.9;u.onstart=()=>setSpeaking(true);u.onend=()=>setSpeaking(false);
+    window.speechSynthesis.speak(u);
+  };
+
+  return(
+    <div>
+      <SectionHead icon="🎙️" title="VOICE ASSISTANT" sub="Hands-free operation while working"/>
+      <div style={{padding:"0 16px"}}>
+        {err&&<div style={{padding:"10px 12px",background:C.red+"18",border:`1px solid ${C.red}33`,borderRadius:8,fontSize:12,color:C.red,marginBottom:12}}>⚠️ {err}</div>}
+        <div style={{textAlign:"center",padding:"20px 0 24px"}}>
+          <button onClick={toggleListen} style={{
+            width:130,height:130,borderRadius:"50%",
+            background:listening?C.red:C.amber,border:"none",
+            boxShadow:listening?`0 0 40px ${C.red}55`:`0 0 20px ${C.amber}33`,
+            cursor:"pointer",fontSize:52,transition:"all .3s",
+            animation:listening?"glow 1.2s ease-in-out infinite":"none"
+          }}>🎙️</button>
+          <div style={{marginTop:14,fontSize:12,fontWeight:700,letterSpacing:2.5,color:listening?C.red:C.sub}}>
+            {listening?"● LISTENING — TAP TO STOP":"TAP TO SPEAK"}
+          </div>
+        </div>
+        {transcript&&<Card style={{marginBottom:12}}>
+          <Label>TRANSCRIPT</Label>
+          <div style={{fontSize:14,color:C.text,fontStyle:"italic",lineHeight:1.5}}>"{transcript}"</div>
+        </Card>}
+        {transcript&&!loading&&<Btn full onClick={doSearch} style={{marginBottom:12,padding:14}}>
+          🔍 SEARCH: "{transcript.slice(0,35)}{transcript.length>35?"...":""}"
+        </Btn>}
+        {loading&&<div style={{textAlign:"center",padding:20,color:C.amber,fontSize:12,letterSpacing:2}}>⟳ SEARCHING...</div>}
+        {speaking&&<div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:C.card,border:`1px solid ${C.blue}44`,borderRadius:10,marginBottom:12}}>
+          <span style={{fontSize:20}}>🔊</span>
+          <span style={{fontSize:12,color:C.blue,fontWeight:700,letterSpacing:1}}>READING ALOUD...</span>
+          <Btn variant="danger" onClick={()=>{window.speechSynthesis.cancel();setSpeaking(false);}} style={{marginLeft:"auto",padding:"6px 12px",fontSize:11}}>■ Stop</Btn>
+        </div>}
+        {result&&<>
+          <TowResult text={result} vehicle={transcript} onPrint={()=>printPDF(transcript,result)}/>
+          {!speaking&&<div style={{padding:"0 0 16px"}}><Btn full variant="ghost" onClick={()=>speak(result)}>🔊 READ ALOUD</Btn></div>}
+        </>}
+      </div>
+    </div>
+  );
+}
+
+// ─── JOBS TAB ──────────────────────────────
+function JobsTab({jobs,setJobs}){
+  const [showForm,setShowForm]=useState(false);
+  const [form,setForm]=useState({customer:"",phone:"",pickup:"",dropoff:"",vehicle:"",notes:""});
+  const sc={"Pending":C.sub,"En Route":C.blue,"On Scene":C.amber,"Towing":C.purple,"Completed":C.green};
+  const statuses=Object.keys(sc);
+  const up=(k,v)=>setForm(p=>({...p,[k]:v}));
+
+  const addJob=()=>{
+    if(!form.customer||!form.pickup)return;
+    setJobs(p=>[{id:Date.now(),...form,status:"Pending",ts:new Date().toLocaleTimeString()},...p]);
+    setForm({customer:"",phone:"",pickup:"",dropoff:"",vehicle:"",notes:""});
+    setShowForm(false);
+  };
+
+  return(
+    <div>
+      <SectionHead icon="🗂️" title="JOB TRACKER" sub="Manage your active calls"/>
+      <div style={{padding:"0 16px"}}>
+        <Btn full onClick={()=>setShowForm(s=>!s)} style={{marginBottom:14}}>
+          {showForm?"✕ CANCEL":"+ NEW JOB"}
+        </Btn>
+        {showForm&&<Card style={{marginBottom:14}}>
+          <div style={{fontWeight:700,fontSize:12,color:C.amber,letterSpacing:1.5,marginBottom:12}}>NEW JOB DETAILS</div>
+          {[["CUSTOMER *","customer"],["PHONE","phone"],["PICKUP *","pickup"],["DROP-OFF","dropoff"],["VEHICLE","vehicle"]].map(([l,k])=>(
+            <div key={k} style={{marginBottom:10}}>
+              <Label>{l}</Label><TInput value={form[k]} onChange={e=>up(k,e.target.value)} placeholder={k}/>
+            </div>
+          ))}
+          <div style={{marginBottom:10}}><Label>NOTES</Label><TInput value={form.notes} onChange={e=>up("notes",e.target.value)} multiline rows={2}/></div>
+          <Btn full onClick={addJob}>CREATE JOB</Btn>
+        </Card>}
+        {jobs.length===0&&!showForm&&<div style={{textAlign:"center",padding:50,color:C.dim}}><div style={{fontSize:44,marginBottom:10}}>🗂️</div><div>No active jobs</div></div>}
+        {jobs.map(job=>(
+          <Card key={job.id} style={{marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{fontWeight:700,fontSize:15}}>{job.customer}</div>
+              <Badge label={job.status} color={sc[job.status]}/>
+            </div>
+            <div style={{fontSize:12,color:C.sub,lineHeight:1.8}}>
+              {job.phone&&<div>📞 {job.phone}</div>}
+              <div>📍 {job.pickup}</div>
+              {job.dropoff&&<div>🏁 {job.dropoff}</div>}
+              {job.vehicle&&<div>🚗 {job.vehicle}</div>}
+              {job.notes&&<div style={{fontStyle:"italic",color:C.dim}}>📝 {job.notes}</div>}
+              <div>🕐 {job.ts}</div>
+            </div>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
+              {statuses.filter(s=>s!==job.status).map(s=>(
+                <button key={s} onClick={()=>setJobs(p=>p.map(j=>j.id===job.id?{...j,status:s}:j))}
+                  style={{padding:"4px 9px",fontSize:10,borderRadius:5,cursor:"pointer",fontWeight:700,background:sc[s]+"18",color:sc[s],border:`1px solid ${sc[s]}33`}}>{s}</button>
+              ))}
+              <button onClick={()=>setJobs(p=>p.filter(j=>j.id!==job.id))}
+                style={{padding:"4px 9px",fontSize:10,borderRadius:5,cursor:"pointer",fontWeight:700,background:C.red+"18",color:C.red,border:`1px solid ${C.red}33`,marginLeft:"auto"}}>🗑️</button>
+            </div>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── INVOICE TAB ───────────────────────────
+function InvoiceTab(){
+  const [f,setF]=useState({customer:"",vehicle:"",hookFee:"85",mileage:"0",mileageRate:"3.50",winching:"0",dollies:"0",storage:"0",labor:"0",laborNote:""});
+  const n=k=>parseFloat(f[k])||0;
+  const total=n("hookFee")+n("mileage")*n("mileageRate")+n("winching")+n("dollies")+n("storage")+n("labor");
+  const up=(k,v)=>setF(p=>({...p,[k]:v}));
+
+  const NF=({label,k})=>(
+    <div style={{flex:1,minWidth:80}}>
+      <Label>{label}</Label>
+      <input type="number" value={f[k]} onChange={e=>up(k,e.target.value)}
+        style={{width:"100%",background:C.card2,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 12px",color:C.text,fontSize:13,outline:"none"}}/>
+    </div>
+  );
+
+  const printInvoice=()=>{
+    const w=window.open("","_blank");if(!w)return;
+    const rows=[
+      ["Hook / Dispatch Fee",n("hookFee")],
+      n("mileage")>0&&[`Mileage (${f.mileage} mi × $${f.mileageRate}/mi)`,n("mileage")*n("mileageRate")],
+      n("winching")>0&&["Winching Fee",n("winching")],
+      n("dollies")>0&&["Dollies",n("dollies")],
+      n("storage")>0&&["Storage",n("storage")],
+      n("labor")>0&&[f.laborNote||"Additional Labor",n("labor")],
+    ].filter(Boolean);
+    w.document.write(`<!DOCTYPE html><html><head><title>Invoice</title><style>
+    *{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,sans-serif;padding:50px;max-width:640px;margin:0 auto;color:#111}
+    .logo{font-size:26px;font-weight:900;letter-spacing:3px;color:#f59e0b}.hdr{border-bottom:3px solid #f59e0b;padding-bottom:18px;margin-bottom:24px}
+    table{width:100%;border-collapse:collapse;margin:20px 0}td{padding:10px 14px;border-bottom:1px solid #eee;font-size:14px}
+    .label{color:#666}.total{background:#fff8e7;font-weight:700;font-size:16px;border-top:2px solid #f59e0b}
+    .footer{margin-top:40px;text-align:center;font-size:11px;color:#aaa;padding-top:16px;border-top:1px solid #eee}
+    </style></head><body>
+    <div class="hdr"><div class="logo">🏗️ TOWCHECK PRO</div><div style="font-size:12px;color:#888;margin-top:4px">Professional Towing & Recovery Services</div></div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:24px;font-size:13px">
+    <div><strong>Bill To:</strong><br/>${f.customer||"Customer"}</div>
+    <div style="text-align:right"><strong>Date:</strong> ${new Date().toLocaleDateString()}<br/><strong>Vehicle:</strong> ${f.vehicle||"—"}</div></div>
+    <table>${rows.map(([l,v])=>`<tr><td class="label">${l}</td><td style="text-align:right">$${v.toFixed(2)}</td></tr>`).join("")}
+    <tr class="total"><td>TOTAL DUE</td><td style="text-align:right">$${total.toFixed(2)}</td></tr></table>
+    <div class="footer">Thank you for your business · TowCheck Pro · ${new Date().getFullYear()}</div>
+    </body></html>`);
+    w.document.close();setTimeout(()=>w.print(),400);
+  };
+
+  return(
+    <div>
+      <SectionHead icon="💰" title="INVOICE GENERATOR" sub="Professional towing receipts on the spot"/>
+      <div style={{padding:"0 16px"}}>
+        <Card style={{marginBottom:12}}>
+          <div style={{fontWeight:700,fontSize:11,color:C.amber,letterSpacing:1.5,marginBottom:12}}>JOB INFO</div>
+          <div style={{marginBottom:10}}><Label>CUSTOMER</Label><TInput value={f.customer} onChange={e=>up("customer",e.target.value)} placeholder="Customer name"/></div>
+          <div><Label>VEHICLE</Label><TInput value={f.vehicle} onChange={e=>up("vehicle",e.target.value)} placeholder="e.g. 2022 Honda Civic"/></div>
+        </Card>
+        <Card style={{marginBottom:12}}>
+          <div style={{fontWeight:700,fontSize:11,color:C.amber,letterSpacing:1.5,marginBottom:12}}>CHARGES</div>
+          <div style={{display:"flex",gap:10,marginBottom:10}}><NF label="HOOK FEE ($)" k="hookFee"/><NF label="MILES" k="mileage"/><NF label="$/MILE" k="mileageRate"/></div>
+          <div style={{display:"flex",gap:10,marginBottom:10}}><NF label="WINCHING ($)" k="winching"/><NF label="DOLLIES ($)" k="dollies"/><NF label="STORAGE ($)" k="storage"/></div>
+          <div style={{display:"flex",gap:10,marginBottom:10}}><NF label="OTHER ($)" k="labor"/></div>
+          <div><Label>OTHER DESCRIPTION</Label><TInput value={f.laborNote} onChange={e=>up("laborNote",e.target.value)} placeholder="e.g. After-hours fee"/></div>
+        </Card>
+        <div style={{background:C.amberDark,border:`1px solid ${C.amber}`,borderRadius:14,padding:"16px 20px",marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontSize:14,fontWeight:800,letterSpacing:2}}>TOTAL DUE</div>
+          <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:42,color:C.amber,letterSpacing:3}}>${total.toFixed(2)}</div>
+        </div>
+        <Btn full onClick={printInvoice} style={{padding:16,fontSize:15}}>🖨️ GENERATE INVOICE PDF</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ─── CHECKLIST TAB ─────────────────────────
+function ChecklistTab(){
+  const ITEMS=[
+    {id:"winch",cat:"Equipment",label:"Winch — cable, hook & safety latch"},
+    {id:"straps",cat:"Equipment",label:"Wheel straps / tie-downs — no fraying"},
+    {id:"chains",cat:"Equipment",label:"Safety chains — hooks, length & clips"},
+    {id:"dollies",cat:"Equipment",label:"Dollies — wheels spin freely, no damage"},
+    {id:"snatch",cat:"Equipment",label:"Snatch blocks & rigging hardware"},
+    {id:"pto",cat:"Mechanical",label:"PTO — engages & disengages smoothly"},
+    {id:"hydraulics",cat:"Mechanical",label:"Hydraulics — no leaks, full operation"},
+    {id:"brakes",cat:"Mechanical",label:"Truck brakes — responsive, no pulsing"},
+    {id:"tires",cat:"Mechanical",label:"All tires — inflation & no visible damage"},
+    {id:"lights_f",cat:"Lights",label:"Front lights — headlights & turn signals"},
+    {id:"lights_r",cat:"Lights",label:"Rear lights — brake, turn, reverse, clearance"},
+    {id:"strobe",cat:"Lights",label:"Strobe / warning lights — operational"},
+    {id:"oil",cat:"Fluids",label:"Engine oil — level OK, no leaks"},
+    {id:"coolant",cat:"Fluids",label:"Coolant — level OK, radiator cap sealed"},
+    {id:"fuel",cat:"Fluids",label:"Fuel — sufficient for full shift"},
+    {id:"vest",cat:"Safety",label:"Safety vests — in truck"},
+    {id:"cones",cat:"Safety",label:"Traffic cones / flares — stocked"},
+    {id:"firstaid",cat:"Safety",label:"First aid kit — stocked & accessible"},
+    {id:"fire",cat:"Safety",label:"Fire extinguisher — charged & accessible"},
+  ];
+  const cats=[...new Set(ITEMS.map(i=>i.cat))];
+  const [checked,setChecked]=useState({});
+  const [log,setLog]=useState(null);
+  const done=Object.values(checked).filter(Boolean).length;
+  const allDone=done===ITEMS.length;
+
+  return(
+    <div>
+      <SectionHead icon="📋" title="DAILY INSPECTION" sub="Pre-shift truck verification log"/>
+      <div style={{padding:"0 16px"}}>
+        <Card style={{marginBottom:14}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+            <Label>COMPLETION</Label>
+            <span style={{fontSize:11,fontWeight:700,color:allDone?C.green:C.amber}}>{done}/{ITEMS.length}</span>
+          </div>
+          <div style={{height:7,background:C.card2,borderRadius:4,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${(done/ITEMS.length)*100}%`,background:allDone?C.green:C.amber,transition:"width .3s",borderRadius:4}}/>
+          </div>
+        </Card>
+        {cats.map(cat=>(
+          <div key={cat} style={{marginBottom:16}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:2,color:C.amber,padding:"5px 0",borderBottom:`1px solid ${C.border}`,marginBottom:8}}>{cat.toUpperCase()}</div>
+            {ITEMS.filter(i=>i.cat===cat).map(item=>(
+              <div key={item.id} onClick={()=>setChecked(p=>({...p,[item.id]:!p[item.id]}))} style={{
+                display:"flex",alignItems:"center",gap:12,padding:"10px 12px",
+                background:checked[item.id]?C.green+"0e":C.card,border:`1px solid ${checked[item.id]?C.green+"33":C.border}`,
+                borderRadius:9,marginBottom:6,cursor:"pointer",transition:"all .2s"
+              }}>
+                <div style={{width:22,height:22,borderRadius:5,flexShrink:0,fontSize:14,fontWeight:700,
+                  background:checked[item.id]?C.green:"transparent",border:`2px solid ${checked[item.id]?C.green:C.border}`,
+                  display:"flex",alignItems:"center",justifyContent:"center",color:"#000"
+                }}>{checked[item.id]&&"✓"}</div>
+                <span style={{fontSize:13,color:checked[item.id]?C.dim:C.text,textDecoration:checked[item.id]?"line-through":"none"}}>{item.label}</span>
+              </div>
+            ))}
+          </div>
+        ))}
+        <Btn full onClick={()=>setLog(new Date().toLocaleString())} disabled={!allDone}
+          style={{padding:16,marginBottom:14,background:allDone?C.green:C.dim,color:allDone?"#000":C.sub}}>
+          {allDone?"✓ SUBMIT & LOG INSPECTION":`${ITEMS.length-done} items remaining`}
+        </Btn>
+        {log&&<Card style={{border:`1px solid ${C.green}44`,background:C.green+"0d",marginBottom:14}}>
+          <div style={{color:C.green,fontWeight:700,fontSize:14}}>✓ INSPECTION LOGGED</div>
+          <div style={{fontSize:12,color:C.sub,marginTop:4}}>{log} — All {ITEMS.length} items verified</div>
+        </Card>}
+      </div>
+    </div>
+  );
+}
+
+// ─── EV TAB ────────────────────────────────
+function EVTab(){
+  const [sel,setSel]=useState(null);
+  const [result,setResult]=useState('');
+  const [loading,setLoading]=useState(false);
+  const evs=[
+    {make:"Tesla",icon:"🔋",models:["Model 3","Model Y","Model S","Model X","Cybertruck"]},
+    {make:"Ford",icon:"🔌",models:["F-150 Lightning","Mustang Mach-E"]},
+    {make:"Rivian",icon:"⚡",models:["R1T","R1S"]},
+    {make:"Chevy",icon:"⚡",models:["Silverado EV","Equinox EV","Blazer EV"]},
+    {make:"Hyundai",icon:"🔋",models:["IONIQ 5","IONIQ 6","Kona EV"]},
+    {make:"Kia",icon:"🔌",models:["EV6","EV9","Niro EV"]},
+    {make:"BMW",icon:"🔋",models:["iX","i4","i7","i5"]},
+    {make:"Lucid",icon:"⚡",models:["Air","Gravity"]},
+  ];
+
+  const search=async(make,model)=>{
+    const v=`${make} ${model}`;setSel(v);setLoading(true);setResult('');
+    try{
+      const t=await callClaude([{role:"user",content:`Full EV towing procedure for ${v} including transport mode activation, high-voltage safety, flatbed requirements, battery fire protocol, and first responder instructions.`}],
+        TOW_SYSTEM+"\nFor EVs: always list transport mode steps, ORANGE cable locations, thermal runaway signs, first responder 12V disconnect location, and emphasize FLATBED ONLY.");
+      setResult(t);
+    }catch(e){setResult("Failed to load EV procedure: "+e.message);}
+    finally{setLoading(false);}
+  };
+
+  return(
+    <div>
+      <SectionHead icon="⚡" title="EV SAFETY MODE" sub="High-voltage towing & first responder protocols"/>
+      <div style={{margin:"0 16px 14px",padding:"12px 16px",background:"#450a0a",border:`2px solid ${C.red}`,borderRadius:12}}>
+        <div style={{fontWeight:800,fontSize:12,color:C.red,letterSpacing:1.5,marginBottom:5}}>⚡ HIGH VOLTAGE — UP TO 800V</div>
+        <div style={{fontSize:12,color:"#fca5a5",lineHeight:1.6}}>ORANGE cables = High Voltage. Never cut, puncture, or contact HV components. All EVs require FLATBED ONLY.</div>
+      </div>
+      <div style={{padding:"0 16px"}}>
+        {evs.map(ev=>(
+          <div key={ev.make} style={{marginBottom:14}}>
+            <div style={{fontSize:11,color:C.amber,fontWeight:700,letterSpacing:1.5,marginBottom:7}}>{ev.icon} {ev.make.toUpperCase()}</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+              {ev.models.map(model=>(
+                <button key={model} onClick={()=>search(ev.make,model)} style={{
+                  padding:"7px 13px",fontSize:12,borderRadius:7,cursor:"pointer",fontWeight:700,
+                  background:sel===`${ev.make} ${model}`?C.amberDark:C.card,
+                  color:sel===`${ev.make} ${model}`?C.amber:C.text,
+                  border:`1px solid ${sel===`${ev.make} ${model}`?C.amber:C.border}`
+                }}>{model}</button>
+              ))}
+            </div>
+          </div>
+        ))}
+        {loading&&<div style={{textAlign:"center",padding:28,color:C.amber,fontSize:12,letterSpacing:2}}>⚡ LOADING EV PROCEDURE...</div>}
+        {result&&<TowResult text={result} vehicle={sel} onPrint={()=>printPDF(sel,result)}/>}
+      </div>
+    </div>
+  );
+}
+
+// ─── TRANSLATE TAB ─────────────────────────
+function TranslateTab(){
+  const [text,setText]=useState('');
+  const [lang,setLang]=useState('Spanish');
+  const [result,setResult]=useState('');
+  const [loading,setLoading]=useState(false);
+  const langs=["Spanish","French","Portuguese","German","Mandarin","Arabic","Russian","Japanese","Korean","Italian"];
+  const phrases=[
+    "I need to put your car in neutral before towing.",
+    "Please release the parking brake.",
+    "I will not damage your vehicle — I need to document its current condition.",
+    "Please sign this pre-tow damage inspection form.",
+    "Your vehicle will be towed to a safe location.",
+    "I need access to the shift lock override button.",
+    "The flatbed truck is the safest method for your vehicle.",
+    "Do not start the engine while I am towing.",
+  ];
+
+  const translate=async()=>{
+    if(!text.trim())return;
+    setLoading(true);setResult('');
+    try{
+      const t=await callClaude([{role:"user",content:`Translate to ${lang}: "${text}"`}],
+        `You are a professional translator. Translate accurately to ${lang}. Return only the translation.`,600);
+      setResult(t);
+    }catch{setResult("Translation failed.");}
+    finally{setLoading(false);}
+  };
+
+  return(
+    <div>
+      <SectionHead icon="🌐" title="TRANSLATE" sub="Communicate with customers in any language"/>
+      <div style={{padding:"0 16px"}}>
+        <Label>LANGUAGE</Label>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
+          {langs.map(l=>(
+            <button key={l} onClick={()=>setLang(l)} style={{
+              padding:"5px 11px",fontSize:11,borderRadius:6,cursor:"pointer",fontWeight:700,
+              background:lang===l?C.amber:C.card,color:lang===l?"#000":C.text,
+              border:`1px solid ${lang===l?C.amber:C.border}`}}>{l}</button>
+          ))}
+        </div>
+        <Label>QUICK PHRASES</Label>
+        {phrases.map((p,i)=>(
+          <div key={i} onClick={()=>{setText(p);setResult('');}}
+            style={{padding:"9px 12px",background:C.card,border:`1px solid ${C.border}`,borderRadius:9,marginBottom:6,cursor:"pointer",fontSize:12,color:C.text}}>{p}</div>
+        ))}
+        <div style={{marginTop:12,marginBottom:8}}>
+          <Label>CUSTOM TEXT</Label>
+          <TInput value={text} onChange={e=>setText(e.target.value)} placeholder="Type message to translate..." multiline rows={3}/>
+        </div>
+        <Btn full onClick={translate} disabled={loading||!text} style={{marginBottom:14}}>
+          {loading?"TRANSLATING...":"TRANSLATE → "+lang.toUpperCase()}
+        </Btn>
+        {result&&<Card style={{border:`1px solid ${C.amber}33`}}>
+          <Label>{lang.toUpperCase()} TRANSLATION</Label>
+          <div style={{fontSize:20,color:C.text,lineHeight:1.6,marginBottom:10}}>{result}</div>
+          <Btn variant="ghost" style={{fontSize:12,padding:"8px 14px"}} onClick={()=>{const u=new SpeechSynthesisUtterance(result);window.speechSynthesis?.speak(u);}}>🔊 Play Audio</Btn>
+        </Card>}
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ──────────────────────────────
+function App(){
+  const [unlocked,setUnlocked]=useState(false);
+  const [tab,setTab]=useState("search");
+  const [more,setMore]=useState(false);
+  const [history,setHistory]=useState([]);
+  const [jobs,setJobs]=useState([]);
+
+  const addToHistory=(v,r)=>setHistory(p=>[{v,r,ts:new Date().toLocaleTimeString()},...p].slice(0,5));
+
+  if(!unlocked) return <KeyScreen onUnlock={()=>setUnlocked(true)}/>;
+
+  const mainTabs=[
+    {id:"search",icon:"🔍",label:"Search"},
+    {id:"voice",icon:"🎙️",label:"Voice"},
+    {id:"jobs",icon:"🗂️",label:"Jobs"},
+    {id:"invoice",icon:"💰",label:"Invoice"},
+    {id:"__more",icon:"☰",label:"More"},
+  ];
+  const moreTabs=[
+    {id:"checklist",icon:"📋",label:"Checklist"},
+    {id:"ev",icon:"⚡",label:"EV Safety"},
+    {id:"translate",icon:"🌐",label:"Translate"},
+  ];
+  const isMore=moreTabs.some(t=>t.id===tab);
+
+  const handleTab=id=>{
+    if(id==="__more"){setMore(s=>!s);return;}
+    setTab(id);setMore(false);
+  };
+
+  return(
+    <div style={{background:C.bg,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:"'Barlow',sans-serif",color:C.text,paddingBottom:72}}>
+      {/* Header */}
+      <div style={{background:C.surface,borderBottom:`2px solid ${C.amber}`,padding:"11px 16px",display:"flex",alignItems:"center",gap:10,position:"sticky",top:0,zIndex:200}}>
+        <div style={{background:C.amber,color:"#000",width:38,height:38,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>🏗️</div>
+        <div>
+          <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,letterSpacing:3,color:C.amber,lineHeight:1}}>TOWCHECK PRO</div>
+          <div style={{fontSize:9,color:C.dim,letterSpacing:2}}>PROFESSIONAL TOWING ASSISTANT</div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3}}>
+          <div style={{display:"flex",alignItems:"center",gap:5}}>
+            <div style={{width:7,height:7,borderRadius:"50%",background:C.green,boxShadow:`0 0 6px ${C.green}`}}/>
+            <span style={{fontSize:9,color:C.green,fontWeight:700,letterSpacing:1}}>AI LIVE</span>
+          </div>
+          {jobs.length>0&&<Badge label={`${jobs.length} JOB${jobs.length>1?"S":""}`} color={C.blue}/>}
+        </div>
+      </div>
+
+      {/* More Drawer */}
+      {more&&<>
+        <div style={{position:"fixed",inset:0,zIndex:250}} onClick={()=>setMore(false)}/>
+        <div style={{position:"fixed",bottom:70,left:"50%",transform:"translateX(-50%)",width:"min(430px,100vw)",background:C.surface,borderTop:`2px solid ${C.amber}`,padding:"14px 16px",zIndex:300,boxShadow:"0 -10px 40px #000a"}}>
+          <div style={{fontSize:10,color:C.sub,fontWeight:700,letterSpacing:2,marginBottom:10}}>MORE TOOLS</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+            {moreTabs.map(t=>(
+              <button key={t.id} onClick={()=>handleTab(t.id)} style={{
+                background:tab===t.id?C.amberDark:C.card2,border:`1px solid ${tab===t.id?C.amber:C.border}`,
+                borderRadius:12,padding:"11px 6px",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:5
+              }}>
+                <span style={{fontSize:22}}>{t.icon}</span>
+                <span style={{fontSize:9,color:tab===t.id?C.amber:C.text,fontWeight:700,letterSpacing:.5}}>{t.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </>}
+
+      {/* Content */}
+      {tab==="search"&&<SearchTab history={history} addToHistory={addToHistory}/>}
+      {tab==="voice"&&<VoiceTab addToHistory={addToHistory}/>}
+      {tab==="jobs"&&<JobsTab jobs={jobs} setJobs={setJobs}/>}
+      {tab==="invoice"&&<InvoiceTab/>}
+      {tab==="checklist"&&<ChecklistTab/>}
+      {tab==="ev"&&<EVTab/>}
+      {tab==="translate"&&<TranslateTab/>}
+
+      {/* Bottom Nav */}
+      <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"min(430px,100vw)",background:C.surface,borderTop:`1px solid ${C.border}`,display:"flex",zIndex:200}}>
+        {mainTabs.map(t=>{
+          const active=t.id==="__more"?(more||isMore):tab===t.id;
+          return(
+            <button key={t.id} onClick={()=>handleTab(t.id)} style={{
+              flex:1,padding:"9px 0 10px",background:"none",border:"none",cursor:"pointer",
+              display:"flex",flexDirection:"column",alignItems:"center",gap:3,
+              borderTop:`2px solid ${active?C.amber:"transparent"}`,transition:"border-color .2s"
+            }}>
+              <span style={{fontSize:20}}>{t.icon}</span>
+              <span style={{fontSize:9,color:active?C.amber:C.dim,fontWeight:700,letterSpacing:.5}}>{t.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
