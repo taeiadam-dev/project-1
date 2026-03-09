@@ -1,0 +1,1 @@
+Unlike a general AI assistant, TowCheck Pro is pre-configured to think, respond, and prioritize exactly like a seasoned towing professional. Every answer is tailored for the field — clear, fast, and safety-first.
